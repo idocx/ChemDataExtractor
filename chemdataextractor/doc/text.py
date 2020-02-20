@@ -369,6 +369,7 @@ class Sentence(BaseText):
         abbreviations = []
         if self.abbreviation_detector:
             # log.debug('Detecting abbreviations')
+            pos_tags = self.pos_tags
             ners = self.unprocessed_ner_tags
             for abbr_span, long_span in self.abbreviation_detector.detect_spans(self.raw_tokens):
                 abbr = self.raw_tokens[abbr_span[0]:abbr_span[1]]
@@ -377,7 +378,8 @@ class Sentence(BaseText):
                 long_tags = ners[long_span[0]:long_span[1]]
                 unique_tags = set([tag[2:] for tag in long_tags if tag is not None])
                 tag = long_tags[0][2:] if None not in long_tags and len(unique_tags) == 1 else None
-                abbreviations.append((abbr, long, tag))
+                pos = pos_tags[long_span[0]:long_span[1]]
+                abbreviations.append((abbr, long, pos, tag))
         return abbreviations
 
     @memoized_property

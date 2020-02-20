@@ -13,7 +13,10 @@ from __future__ import print_function
 from __future__ import unicode_literals
 import logging
 import re
+import json
+import os
 
+from .periodic_table import ELEMENTS, LOW_CHARS, UP_CHARS
 from ..text import bracket_level
 
 
@@ -29,25 +32,68 @@ class AbbreviationDetector(object):
     # TODO: Extend to Greek characters (custom method instead of .isalnum())
 
     #: Minimum abbreviation length
-    abbr_min = 3
+    abbr_min = 2
     #: Maximum abbreviation length
     abbr_max = 10
     #: String equivalents to use when detecting abbreviations.
     abbr_equivs = []
+    #: Connecter
+    connector = ("/",)
+    #: Stop words, which should not be seen as abbreviation
+    stop_words = ("Sigma", "Aladdin", "Aldrich", "Alfa", "Aesar")
+    #: Hyphen
+    # keep "-" always be the first
+    hyphen = ("-", "–", "−", "@")
 
     def __init__(self, abbr_min=None, abbr_max=None, abbr_equivs=None):
         self.abbr_min = abbr_min if abbr_min is not None else self.abbr_min
         self.abbr_max = abbr_max if abbr_max is not None else self.abbr_max
         self.abbr_equivs = abbr_equivs if abbr_equivs is not None else self.abbr_equivs
+        
+    def _len_without_sym(self, tokens):
+        length = 0
+        for token in tokens:
+            if token not in self.hyphen:
+                length += 1
+        return length
+    
+    def _filter_abbr(self, tokens):
+        is_allowed_token = []
+        # used in chemAbbreviationDetector class
+        has_common_materials = hasattr(self, "common_materials")
+        has_elements = hasattr(self, "elements")
+        for token in tokens:
+            if token in self.stop_words:
+                is_allowed_token.append(False)
+            elif has_elements and token in self.elements:
+                is_allowed_token.append(False)
+            elif has_common_materials and token in self.common_materials:
+                is_allowed_token.append(False)
+            else:
+                is_allowed_token.append(True)
+        return any(is_allowed_token)
 
     def _is_allowed_abbr(self, tokens):
-        """Return True if text is an allowed abbreviation."""
-        if len(tokens) <= 2:
+        """
+        Return True if text is an allowed abbreviation.
+        """
+        if not self._filter_abbr(tokens):
+            return False
+        if self._len_without_sym(tokens) <= 2 or self._is_separated_by_connector(tokens):
             abbr_text = ''.join(tokens)
             if self.abbr_min <= len(abbr_text) <= self.abbr_max and bracket_level(abbr_text) == 0:
+                if len(abbr_text) <= 2:
+                    if not re.match(r"[A-z]{2}", abbr_text):
+                        return False
                 if abbr_text[0].isalnum() and any(c.isalpha() for c in abbr_text):
                     # Disallow property values
-                    if re.match('^\d+(\.\d+)?(g|m[lL]|cm)$', abbr_text):
+                    if re.match('^\d+(\.\d+)?(g|m[lLM]|cm|mol|h|min)$', abbr_text):
+                        return False
+                    elif re.match("(g|m[lLM]|cm|mol|h|min)$", abbr_text):
+                        return False
+                    elif re.match("\d\.?\d*[A-z]", abbr_text):  # avoid 1A 1M and so on ...
+                        return False
+                    elif re.match("(\w\.)+", abbr_text):  # avoid e.g. A.R. i.e.
                         return False
                     return True
         return False
@@ -71,10 +117,14 @@ class AbbreviationDetector(object):
                         candidates.append((abbr_span, long_span))
                         #candidates.append((abbr, long))
             if t1 == '(':
-                for j, t2 in enumerate(tokens[i+1:]):
-                    if t2 in {')', ';', ','}:
-                        bracket_spans.append((i+1, i+j+1))
+                k = i
+                for j, t2 in enumerate(tokens[k+1:]):
+                    if t2 in (')', ';', ','):
+                        bracket_spans.append((i+1, k+j+1))
                         break
+                    # elif t2 in self.connector:
+                    #     bracket_spans.append((i+1, k+j+1))
+                    #     i = k + j + 1
         for span in bracket_spans:
             inside = tokens[span[0]:span[1]]
             if self._is_allowed_abbr(inside):
@@ -82,10 +132,23 @@ class AbbreviationDetector(object):
                 #long = self._get_long(inside, tokens[:span[0]-1], fix_right=True)
                 long_span = self._get_long_span(tokens, span, end=span[0]-1)
                 if long_span:
-                    candidates.append((span, long_span))
+                    if self._is_separated_by_connector(inside):
+                        long = tokens[long_span[0]:long_span[1]]
+                        connector_pos_abbr = self._find_connector_position(inside, span[0])
+                        connector_pos_long = self._find_connector_position(long, long_span[0])
+                        if len(connector_pos_long) == len(connector_pos_abbr):
+                            for i in range(len(connector_pos_abbr)-1):
+                                candidates.append((
+                                    (connector_pos_abbr[i]+1, connector_pos_abbr[i+1]),
+                                    (connector_pos_long[i]+1, connector_pos_long[i+1])
+                                ))
+                        else:
+                            candidates.append((span, long_span))
+                    else:
+                        candidates.append((span, long_span))
                     #candidates.append((inside, long))
             elif tokens[span[1]] == ')':
-                if span[0] - 1 > 0 and self._is_allowed_abbr([tokens[span[0]-2]]):
+                if span[0] > 1 and self._is_allowed_abbr([tokens[span[0]-2]]):
                     # abbr ( long )
                     #abbr = [tokens[span[0]-2]]
                     abbr_span = (span[0]-2, span[0]-1)
@@ -107,7 +170,6 @@ class AbbreviationDetector(object):
         return candidates
 
     def _get_long_span(self, tokens, abbr_span, start=None, end=None):
-        """"""
         abbr = tokens[abbr_span[0]:abbr_span[1]]
         #print(abbr)
         # Get the maximum allowed number of tokens
@@ -126,14 +188,40 @@ class AbbreviationDetector(object):
             for i in range(1, min(max_length + 1, len(tokens) + 1)):
                 if self._is_valid_long(abbr, tokens[start:start+i]):
                     return (start, start+i)
+                
+    def _is_separated_by_connector(self, tokens):
+        """
+        deal with the situation that the string is separated by '/'
+        e.g. rGO/Cu-Zn/PANI
+        """
+        tmp = 0
+        if len(tokens) <= 2:
+            return False
+        for token in tokens:
+            if re.match(r"^[\w{hyphen}]{{2,}}$".format(hyphen="\\"+"".join(self.hyphen)), token):
+                tmp += 1
+            elif token in self.connector:
+                tmp = 0
+            else:
+                return False
+            if tmp >= 2:
+                return False
+        return tmp != 0
+    
+    def _find_connector_position(self, tokens, start):
+        positions = [start-1]
+        for i in range(len(tokens)):
+            if tokens[i] in self.connector:
+                positions.append(start+i)
+        positions.append(start+len(tokens))
+        return tuple(positions)
 
     def _is_valid_long(self, abbr, tokens):
-        """"""
 
         def _is_valid(abbr, long):
             # Disallowed characters - @ typically in emails
-            if '@' in long:
-                return False
+            # if '@' in long:
+            #     return False
             l_i = len(long) - 1
             for a_i in range(len(abbr) - 1, -1, -1):
                 current = abbr[a_i].lower()
@@ -168,9 +256,20 @@ class AbbreviationDetector(object):
         for abbr_span, long_span in candidates:
             abbr = tokens[abbr_span[0]:abbr_span[1]]
             long = tokens[long_span[0]:long_span[1]]
-            if not all(a in long for a in abbr) and len(''.join(long)) > len(''.join(abbr)):
+            if not all(a.lower() in long for a in abbr) and len(''.join(long)) > len(''.join(abbr)):
                 results.append((abbr_span, long_span))
         return results
+    
+    def _find_first_char(self, tokens):
+        """
+        find all the first char in each token (only A-z)
+        """
+        first_chars = []
+        for token in tokens:
+            first_char = re.search(r"[A-Za-z]", token)
+            if first_char:
+                first_chars.append(first_char.group())
+        return first_chars
 
     def detect(self, tokens):
         """Return a (abbr, long) pair for each abbreviation definition."""
@@ -195,11 +294,7 @@ class ChemAbbreviationDetector(AbbreviationDetector):
     This abbreviation detector has an additional list of string equivalents (e.g. Silver = Ag) that improve abbreviation
     detection on chemistry texts.
     """
-
-    #: Minimum abbreviation length
-    abbr_min = 3
-    #: Maximum abbreviation length
-    abbr_max = 10
+    
     #: String equivalents to use when detecting abbreviations.
     abbr_equivs = [
         ('silver', 'Ag'),
@@ -232,4 +327,29 @@ class ChemAbbreviationDetector(AbbreviationDetector):
         ('borohydride', 'BH4'),
         ('triethylamine', 'NEt3'),
         ('triethylamine', 'Et3N'),
+        ('one', '1'),
+        ('two', '2'),
+        ('three', '3'),
+        ('four', '4'),
+        ('five', '5'),
+        ('six', '6'),
+        ('seven', '7'),
+        ('eight', '8'),
+        ('nine', '9'),        
     ]
+    
+    elements = ELEMENTS
+    
+    def __init__(self, abbr_min=None, abbr_max=None, abbr_equivs=None, common_materials=None):
+        super(ChemAbbreviationDetector, self).__init__(abbr_min=None, abbr_max=None, abbr_equivs=None)
+        self.common_materials = common_materials if common_materials is not None else self.load_common_materials()
+        
+    @staticmethod
+    def load_common_materials(path=None):
+        if path is None:
+            file_path = os.path.dirname(os.path.realpath(__file__))
+            path = os.path.join(file_path, "src/common_materials.json")
+        with open(path, "r", encoding="utf-8") as f:
+            common_materials = json.load(f)
+        return common_materials
+            
