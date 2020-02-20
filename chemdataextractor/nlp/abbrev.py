@@ -16,7 +16,7 @@ import re
 import json
 import os
 
-from .periodic_table import ELEMENTS, LOW_CHARS, UP_CHARS
+from .periodic_table import ELEMENTS
 from ..text import bracket_level
 
 
